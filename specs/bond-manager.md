@@ -1,27 +1,26 @@
+# Bond Manager Interface
+
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 **Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
-- [Bond Manager Interface](#bond-manager-interface)
-  - [Overview](#overview)
-  - [The Bond Problem](#the-bond-problem)
-    - [Dumb Bond](#dumb-bond)
-    - [Gassy Bond](#gassy-bond)
-  - [Implementing the Bond Managers](#implementing-the-bond-managers)
-    - [BondManager Interface](#bondmanager-interface)
-    - [DisputeGameBondManager](#disputegamebondmanager)
-    - [OracleBondManager](#oraclebondmanager)
+- [Overview](#overview)
+- [The Bond Problem](#the-bond-problem)
+  - [Dumb Bond](#dumb-bond)
+  - [Gassy Bond](#gassy-bond)
+- [Types of Bond Managers](#types-of-bond-managers)
+  - [OracleBondManager](#oraclebondmanager)
+  - [AttestationBondManager](#attestationbondmanager)
+  - [DisputeGameBondManager](#disputegamebondmanager)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
-
-# Bond Manager Interface
 
 ## Overview
 
 A bond manager is an abstract entity that handles bonds. This is used in a couple
 of places, but most notably revolving around [propoals](./proposals.md). That is,
 when outputs are able to be posted to the `L2OutputOracle` permissionlessly, there
-must be some value, or bond, that the proposer posts in order to _disincentivize_
+must be some value, or bond, that the proposer posts in order to *disincentivize*
 actors from posting spam and invalid outputs. These bonds, implemented as
 payments in ether, are handled by this abstract bond manager.
 
@@ -56,18 +55,44 @@ by an order of magnitude, and ought to be sufficient.
 
 ### Gassy Bond
 
+Better bond heuristics can be used to establish a bond price that accounts for
+the time-weighted gas price. Gassy Bonds use a separate oracle contract called
+`GasPriceFluctuationTracker` that tracks gas fluctuations within a pre-determined
+bounds. This replaces the ideal solution of tracking challenge costs over all L1
+blocks, but provides a reasonable bounds. This contract is funded by the proposers
+who post the bonds.
 
+## Types of Bond Managers
 
-## Implementing the Bond Managers
-
-Below we specify the bond manager implementations used to support permissionless
-output proposals.
-
-### BondManager Interface
-
-
-### DisputeGameBondManager
-
+Below we outline the various bond managers.
 
 ### OracleBondManager
 
+The oracle bond manager is handles bond management on behalf of the `L2OutputOracle`.
+
+In the `L2OutputOracle`, a permissionless proposer can post an output proposal, which
+becomes finalized after a pre-determined interval detailed in the
+[proposals doc](./proposals.md). When proposing an output, the proposer must
+post a bond that is used to disincentivize spam. When the output is finalized,
+the bond may be claimed by the proposer. But in the case that the output is invalid,
+the bond *should* be seized by a set of challenge agents or a
+[dispute game](./dispute-game-interface.md).
+
+### AttestationBondManager
+
+The attestation bond manager is the simplest bond manager; there is none!
+
+The attestors are a set of permissioned addresses that, when a quorum is reached,
+are able to delete an output proposal. Since the attestors are permissioned, they
+don't need to post bonds, but rather, can only seize the bond posted to the
+`L2OutputOracle` (and by extension, the [OracleBondManager](#-oraclebondmanager))
+by the proposer.
+
+### DisputeGameBondManager
+
+When the attestations are replaced with [dispute games](./dispute-game-interface.md),
+permissionless output proposals will be disputed by a `DisputeGame` instead of
+the set of permissioned attestors. In these games, there will be bonds posted
+at each step of the game. At the end of the game, the bonds are dispersed to the
+winning "side" of the game - the challengers or defeners (who including the proposer).
+The `DisputeGameBondManager` handles the management of all these bonds.
