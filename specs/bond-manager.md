@@ -6,65 +6,68 @@
 
 - [Overview](#overview)
 - [The Bond Problem](#the-bond-problem)
-  - [Dumb Bond](#dumb-bond)
-  - [Gassy Bond](#gassy-bond)
+  - [Simple Bond](#simple-bond)
+  - [Variable Bond](#variable-bond)
 - [Types of Bond Managers](#types-of-bond-managers)
   - [OracleBondManager](#oraclebondmanager)
   - [AttestationBondManager](#attestationbondmanager)
-  - [DisputeGameBondManager](#disputegamebondmanager)
+  - [FaultBondManager](#faultbondmanager)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
 ## Overview
 
-A bond manager is an abstract entity that handles bonds. This is used in a couple
-of places, but most notably revolving around [propoals](./proposals.md). That is,
-when outputs are able to be posted to the `L2OutputOracle` permissionlessly, there
-must be some value, or bond, that the proposer posts in order to *disincentivize*
-actors from posting spam and invalid outputs. These bonds, implemented as
-payments in ether, are handled by this abstract bond manager.
+The bond manager contracts handle bonds for both the [dispute-games](./dispute-game.md)
+and the `L2OutputOracle` contract (detailed in [propoals](./proposals.md)).
 
-When permissionless output proposals are enabled, the `L2OutputOracle` will need
-one bond manager implementation to handle bonds being posted on proposals and to
-call or retract bonds when the output is either deleted or finalized.
+When outputs are permissionlessly posted to the `L2OutputOracle`, the proposer must
+submit some ether as a "bond" to disincentivize spam and invalid outputs. These bonds
+are handled by the `L2OutputOracle`'s bond manager. The `L2OutputOracle` contract should
+forward these bonds on proposals, and call bonds when outputs are either deleted or
+finalized.
 
-Additionally, when [dispute-games](./dispute-game-interface.md) are supported as
-a method of challenging the output [proposals](./proposals.md), a different bond
-manager will be needed since `DisputeGame`s will require more complex bond posting
-including bond escalation, resolving bonds, etc, etc.
+Similarly, the various types of [dispute-games](./dispute-game-interface.md) require
+different bond management. In the simplest dispute game (the "Attestation" dispute game)
+bonds will not be required since the attestors are permissioned. But in more complex games, such as the
+fault dispute game, bonds will be required since the challengers and defenders perform a series of
+alternating onchain transactions requiring bonds at each step. In this case, a separate bond manager than
+that of the `L2OutputOracle` is required.
 
 ## The Bond Problem
 
-While this seems simple, deriving a "correct" and "sound" price for a bond can be
-done in a variety of different ways, each with its own tradeoffs. The two that
-are used are the "Dumb Bond" and the "Gassy Bond".
+At its core, the bond manager is straightforward - it escrows or holds ether and returns
+it when finalized or seized. But the uncertainty of introducing bonds lies in the
+bond _sizing_, i.e. how much should a bond be? Sizing bonds correctly entails a variety of
+tradeoffs. Price them too high, and not enough proposers will post outputs. Price them too low, and
+challengers won't be incentivized to delete outputs if the gas cost of doing so outways the bond itself.
 
-### Dumb Bond
+Below, we outline two different approaches to sizing bonds and the tradeoffs of each.
 
-The Dumb Bond is a very conservative approach to establishing a **fixed** bond
-price using the worst case gas cost for deleting an output proposal. The idea here
-is that a bond that's posted for a given output proposal must at least cover the
+### Simple Bond
+
+The _Simple Bond_ is a very conservative approach to bond management, establishing a **fixed** bond
+size using the worst case gas cost for deleting an output proposal. The idea being
+that a bond posted for a given output proposal must at least cover the
 cost of the challenge agents deleting that output proposal in order to make
-honest output disputes incentive compatible.
+dispute games incentive compatible.
 
-With this approach, the Dumb Bond is fixed to `1 ether`. Working backwards, if
-the Dumb Bond is `1 ether`, the cost of challenging an output proposal must not
-exceed `1 ether`. This would imply a base fee of `10,000` for a challenge costing
-`100,000` gas with a `1 gwei priority fee`. This is an unprecedented base gas fee
-by an order of magnitude, and ought to be sufficient.
+With this approach, the Simple Bond is fixed to `1 ether`. By working backwards, we
+can establish that the cost of challenging an output proposal must not
+exceed `1 ether`. As such, this implies a base fee of `10,000` for a challenge costing
+`100,000` gas with a `1 gwei priority fee`. This leaves challenger agents with a significant
+buffer between the historical highest gas price of roughly `236` in 2020, and the base gas fee of `10,000`.
 
-### Gassy Bond
+### Variable Bond
 
 Better bond heuristics can be used to establish a bond price that accounts for
-the time-weighted gas price. Gassy Bonds use a separate oracle contract called
-`GasPriceFluctuationTracker` that tracks gas fluctuations within a pre-determined
+the time-weighted gas price. One instance of this called _Varable Bonds_ use a separate oracle contract,
+`GasPriceFluctuationTracker`, that tracks gas fluctuations within a pre-determined
 bounds. This replaces the ideal solution of tracking challenge costs over all L1
-blocks, but provides a reasonable bounds. This contract is funded by the proposers
-who post the bonds.
+blocks, but provides a reasonable bounds. Proposers are responsible for funding this contract.
 
 ## Types of Bond Managers
 
-Below we outline the various bond managers.
+Below we outline the bond manager contracts.
 
 ### OracleBondManager
 
@@ -76,23 +79,22 @@ becomes finalized after a pre-determined interval detailed in the
 post a bond that is used to disincentivize spam. When the output is finalized,
 the bond may be claimed by the proposer. But in the case that the output is invalid,
 the bond *should* be seized by a set of challenge agents or a
-[dispute game](./dispute-game-interface.md).
+[dispute game](./dispute-game.md).
 
 ### AttestationBondManager
 
 The attestation bond manager is the simplest bond manager; there is none!
 
-The attestors are a set of permissioned addresses that, when a quorum is reached,
+Attestors are a set of permissioned addresses that, when a quorum is reached,
 are able to delete an output proposal. Since the attestors are permissioned, they
-don't need to post bonds, but rather, can only seize the bond posted to the
-`L2OutputOracle` (and by extension, the [OracleBondManager](#-oraclebondmanager))
-by the proposer.
+don't need to post bonds, but can only seize the proposers bond posted to the
+`L2OutputOracle` (and by extension, the [OracleBondManager](#-oraclebondmanager)).
 
-### DisputeGameBondManager
+### FaultBondManager
 
-When the attestations are replaced with [dispute games](./dispute-game-interface.md),
-permissionless output proposals will be disputed by a `DisputeGame` instead of
-the set of permissioned attestors. In these games, there will be bonds posted
-at each step of the game. At the end of the game, the bonds are dispersed to the
-winning "side" of the game - the challengers or defeners (who including the proposer).
-The `DisputeGameBondManager` handles the management of all these bonds.
+When fault-based [dispute games](./dispute-game.md) are introduced,
+permissionless output proposals can be disputed by a `FaultDisputeGame` instead of
+the permissioned attestors. In these game contracts, bonds are posted
+at each step of the game. Once the game is finished, bonds are dispersed to the
+winners - either the output challengers or defenders (who including the proposer).
+The `FaultBondManager` contract manages all these bonds.
