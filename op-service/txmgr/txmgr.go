@@ -87,22 +87,20 @@ type SimpleTxManager struct {
 }
 
 // NewSimpleTxManager initializes a new SimpleTxManager with the passed Config.
-func NewSimpleTxManager(name string, l log.Logger, m metrics.TxMetricer, cfg Config) *SimpleTxManager {
-	if cfg.NumConfirmations == 0 {
-		panic("txmgr: NumConfirmations cannot be zero")
-	}
-	if cfg.NetworkTimeout == 0 {
-		cfg.NetworkTimeout = 2 * time.Second
+func NewSimpleTxManager(name string, l log.Logger, m metrics.TxMetricer, cfg CLIConfig) (*SimpleTxManager, error) {
+	conf, err := NewConfig(cfg, l)
+	if err != nil {
+		return nil, err
 	}
 
 	return &SimpleTxManager{
-		chainID: cfg.ChainID,
+		chainID: conf.ChainID,
 		name:    name,
-		cfg:     cfg,
-		backend: cfg.Backend,
+		cfg:     conf,
+		backend: conf.Backend,
 		l:       l.New("service", name),
 		metr:    m,
-	}
+	}, nil
 }
 
 func (m *SimpleTxManager) From() common.Address {
@@ -114,12 +112,10 @@ func (m *SimpleTxManager) From() common.Address {
 type TxCandidate struct {
 	// TxData is the transaction data to be used in the constructed tx.
 	TxData []byte
-	// To is the recipient of the constructed tx.
-	To common.Address
+	// To is the recipient of the constructed tx. Nil means contract creation.
+	To *common.Address
 	// GasLimit is the gas limit to be used in the constructed tx.
 	GasLimit uint64
-	// From is the sender (or `from`) of the constructed tx.
-	From common.Address
 }
 
 // Send is used to publish a transaction with incrementally higher gas prices
@@ -152,6 +148,7 @@ func (m *SimpleTxManager) Send(ctx context.Context, candidate TxCandidate) (*typ
 func (m *SimpleTxManager) craftTx(ctx context.Context, candidate TxCandidate) (*types.Transaction, error) {
 	gasTipCap, basefee, err := m.suggestGasPriceCaps(ctx)
 	if err != nil {
+		m.metr.RPCError()
 		return nil, fmt.Errorf("failed to get gas price info: %w", err)
 	}
 	gasFeeCap := calcGasFeeCap(basefee, gasTipCap)
@@ -159,21 +156,23 @@ func (m *SimpleTxManager) craftTx(ctx context.Context, candidate TxCandidate) (*
 	// Fetch the sender's nonce from the latest known block (nil `blockNumber`)
 	childCtx, cancel := context.WithTimeout(ctx, m.cfg.NetworkTimeout)
 	defer cancel()
-	nonce, err := m.backend.NonceAt(childCtx, candidate.From, nil)
+	nonce, err := m.backend.NonceAt(childCtx, m.cfg.From, nil)
 	if err != nil {
+		m.metr.RPCError()
 		return nil, fmt.Errorf("failed to get nonce: %w", err)
 	}
+	m.metr.RecordNonce(nonce)
 
 	rawTx := &types.DynamicFeeTx{
 		ChainID:   m.chainID,
 		Nonce:     nonce,
-		To:        &candidate.To,
+		To:        candidate.To,
 		GasTipCap: gasTipCap,
 		GasFeeCap: gasFeeCap,
 		Data:      candidate.TxData,
 	}
 
-	m.l.Info("creating tx", "to", rawTx.To, "from", candidate.From)
+	m.l.Info("creating tx", "to", rawTx.To, "from", m.cfg.From)
 
 	// If the gas limit is set, we can use that as the gas
 	if candidate.GasLimit != 0 {
@@ -181,8 +180,8 @@ func (m *SimpleTxManager) craftTx(ctx context.Context, candidate TxCandidate) (*
 	} else {
 		// Calculate the intrinsic gas for the transaction
 		gas, err := m.backend.EstimateGas(ctx, ethereum.CallMsg{
-			From:      candidate.From,
-			To:        &candidate.To,
+			From:      m.cfg.From,
+			To:        candidate.To,
 			GasFeeCap: gasFeeCap,
 			GasTipCap: gasTipCap,
 			Data:      rawTx.Data,
@@ -195,7 +194,7 @@ func (m *SimpleTxManager) craftTx(ctx context.Context, candidate TxCandidate) (*
 
 	ctx, cancel = context.WithTimeout(ctx, m.cfg.NetworkTimeout)
 	defer cancel()
-	return m.cfg.Signer(ctx, candidate.From, types.NewTx(rawTx))
+	return m.cfg.Signer(ctx, m.cfg.From, types.NewTx(rawTx))
 }
 
 // send submits the same transaction several times with increasing gas prices as necessary.
@@ -220,6 +219,7 @@ func (m *SimpleTxManager) send(ctx context.Context, tx *types.Transaction) (*typ
 	ticker := time.NewTicker(m.cfg.ResubmissionTimeout)
 	defer ticker.Stop()
 
+	bumpCounter := 0
 	for {
 		select {
 		case <-ticker.C:
@@ -235,12 +235,15 @@ func (m *SimpleTxManager) send(ctx context.Context, tx *types.Transaction) (*typ
 			// Increase the gas price & submit the new transaction
 			tx = m.increaseGasPrice(ctx, tx)
 			wg.Add(1)
+			bumpCounter += 1
 			go sendTxAsync(tx)
 
 		case <-ctx.Done():
 			return nil, ctx.Err()
 
 		case receipt := <-receiptChan:
+			m.metr.RecordGasBumpCount(bumpCounter)
+			m.metr.TxConfirmed(receipt)
 			return receipt, nil
 		}
 	}
@@ -255,6 +258,7 @@ func (m *SimpleTxManager) publishAndWaitForTx(ctx context.Context, tx *types.Tra
 
 	cCtx, cancel := context.WithTimeout(ctx, m.cfg.NetworkTimeout)
 	defer cancel()
+	t := time.Now()
 	err := m.backend.SendTransaction(cCtx, tx)
 	sendState.ProcessSendError(err)
 
@@ -263,19 +267,28 @@ func (m *SimpleTxManager) publishAndWaitForTx(ctx context.Context, tx *types.Tra
 		switch {
 		case errStringMatch(err, core.ErrNonceTooLow):
 			log.Warn("nonce too low", "err", err)
+			m.metr.TxPublished("nonce_to_low")
 		case errStringMatch(err, context.Canceled):
+			m.metr.RPCError()
 			log.Warn("transaction send cancelled", "err", err)
+			m.metr.TxPublished("context_cancelled")
 		case errStringMatch(err, txpool.ErrAlreadyKnown):
 			log.Warn("resubmitted already known transaction", "err", err)
+			m.metr.TxPublished("tx_already_known")
 		case errStringMatch(err, txpool.ErrReplaceUnderpriced):
 			log.Warn("transaction replacement is underpriced", "err", err)
+			m.metr.TxPublished("tx_replacement_underpriced")
 		case errStringMatch(err, txpool.ErrUnderpriced):
 			log.Warn("transaction is underpriced", "err", err)
+			m.metr.TxPublished("tx_underpriced")
 		default:
+			m.metr.RPCError()
 			log.Error("unable to publish transaction", "err", err)
+			m.metr.TxPublished("unknown_error")
 		}
 		return
 	}
+	m.metr.TxPublished("")
 
 	log.Info("Transaction successfully published")
 	// Poll for the transaction to be ready & then send the result to receiptChan
@@ -286,7 +299,7 @@ func (m *SimpleTxManager) publishAndWaitForTx(ctx context.Context, tx *types.Tra
 	}
 	select {
 	case receiptChan <- receipt:
-		m.metr.RecordL1GasFee(receipt)
+		m.metr.RecordTxConfirmationLatency(time.Since(t).Milliseconds())
 	default:
 	}
 }
@@ -318,9 +331,11 @@ func (m *SimpleTxManager) queryReceipt(ctx context.Context, txHash common.Hash, 
 		m.l.Trace("Transaction not yet mined", "hash", txHash)
 		return nil
 	} else if err != nil {
+		m.metr.RPCError()
 		m.l.Info("Receipt retrieval failed", "hash", txHash, "err", err)
 		return nil
 	} else if receipt == nil {
+		m.metr.RPCError()
 		m.l.Warn("Receipt and error are both nil", "hash", txHash)
 		return nil
 	}
@@ -404,6 +419,7 @@ func (m *SimpleTxManager) suggestGasPriceCaps(ctx context.Context) (*big.Int, *b
 	defer cancel()
 	tip, err := m.backend.SuggestGasTipCap(cCtx)
 	if err != nil {
+		m.metr.RPCError()
 		return nil, nil, fmt.Errorf("failed to fetch the suggested gas tip cap: %w", err)
 	} else if tip == nil {
 		return nil, nil, errors.New("the suggested tip was nil")
@@ -412,6 +428,7 @@ func (m *SimpleTxManager) suggestGasPriceCaps(ctx context.Context) (*big.Int, *b
 	defer cancel()
 	head, err := m.backend.HeaderByNumber(cCtx, nil)
 	if err != nil {
+		m.metr.RPCError()
 		return nil, nil, fmt.Errorf("failed to fetch the suggested basefee: %w", err)
 	} else if head.BaseFee == nil {
 		return nil, nil, errors.New("txmgr does not support pre-london blocks that do not have a basefee")

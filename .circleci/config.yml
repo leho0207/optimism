@@ -334,12 +334,6 @@ jobs:
             yarn lint:check || echo "export LINT_STATUS=1" >> "$BASH_ENV"
           working_directory: packages/contracts-bedrock
       - run:
-          name: slither
-          command: |
-            slither --version
-            yarn slither || exit 0
-          working_directory: packages/contracts-bedrock
-      - run:
           name: gas snapshot
           command: |
             forge --version
@@ -381,6 +375,26 @@ jobs:
             if [[ "$FAILED" -ne 0 ]]; then
               exit 1
             fi
+
+  contracts-bedrock-slither:
+    docker:
+      - image: ethereumoptimism/ci-builder:latest
+    resource_class: xlarge
+    steps:
+      - checkout
+      - attach_workspace: { at: "." }
+      - restore_cache:
+          name: Restore Yarn Package Cache
+          keys:
+            - yarn-packages-v2-{{ checksum "yarn.lock" }}
+      - check-changed:
+          patterns: contracts-bedrock,hardhat-deploy-config
+      - run:
+          name: slither
+          command: |
+            slither --version
+            yarn slither
+          working_directory: packages/contracts-bedrock
 
   contracts-bedrock-validate-spaces:
     docker:
@@ -606,7 +620,7 @@ jobs:
           name: run tests
           command: |
             gotestsum --format=standard-verbose --junitfile=/tmp/test-results/<<parameters.module>>.xml \
-            -- -coverpkg=github.com/ethereum-optimism/optimism/... -coverprofile=coverage.out ./...
+            -- -parallel=8 -coverpkg=github.com/ethereum-optimism/optimism/... -coverprofile=coverage.out ./...
           working_directory: <<parameters.module>>
       - run:
           name: upload coverage
@@ -637,9 +651,10 @@ jobs:
           command: |
             # Note: We don't use circle CI test splits because we need to split by test name, not by package. There is an additional
             # constraint that gotestsum does not currently (nor likely will) accept files from different pacakges when building.
-            OP_TESTLOG_DISABLE_COLOR=true OP_E2E_DISABLE_PARALLEL=true OP_E2E_USE_HTTP=<<parameters.use_http>>  gotestsum \
+            # Note: -parallel must be set to match the number of cores in the resource class
+            OP_TESTLOG_DISABLE_COLOR=true OP_E2E_DISABLE_PARALLEL=false OP_E2E_USE_HTTP=<<parameters.use_http>>  gotestsum \
             --format=standard-verbose --junitfile=/tmp/test-results/<<parameters.module>>_http_<<parameters.use_http>>.xml \
-            -- -timeout=20m ./...
+            -- -timeout=20m -parallel=8 ./...
           working_directory: <<parameters.module>>
       - store_test_results:
           path: /tmp/test-results
@@ -995,6 +1010,9 @@ workflows:
       - contracts-bedrock-checks:
           requires:
             - yarn-monorepo
+      - contracts-bedrock-slither:
+          requires:
+            - yarn-monorepo
       - contracts-bedrock-validate-spaces:
           requires:
             - yarn-monorepo
@@ -1124,6 +1142,9 @@ workflows:
           name: op-proposer-lint
           module: op-proposer
       - go-lint:
+          name: op-program-lint
+          module: op-program
+      - go-lint:
           name: op-service-lint
           module: op-service
       - go-lint:
@@ -1146,6 +1167,9 @@ workflows:
           name: op-proposer-tests
           module: op-proposer
       - go-test:
+          name: op-program-tests
+          module: op-program
+      - go-test:
           name: op-service-tests
           module: op-service
       - go-e2e-test:
@@ -1164,12 +1188,14 @@ workflows:
             - op-e2e-lint
             - op-node-lint
             - op-proposer-lint
+            - op-program-lint
             - op-service-lint
             - op-batcher-tests
             - op-bindings-tests
             - op-chain-ops-tests
             - op-node-tests
             - op-proposer-tests
+            - op-program-tests
             - op-service-tests
             - op-e2e-WS-tests
             - op-e2e-HTTP-tests
