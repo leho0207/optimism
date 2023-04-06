@@ -53,11 +53,21 @@ The _Simple Bond_ is a very conservative approach to bond management, establishi
 size. The idea behind simple bond pricing is to establish the worst case gas cost for
 the next step in the dispute game.
 
-With this approach, the Simple Bond for an Attestation dispute game can be fixed to `1 ether`.
-By working backwards, we can establish that the cost of challenging an output proposal must not
-exceed `1 ether`. As such, this implies a base fee of `10,000` for a challenge costing
-`100,000` gas with a `1 gwei priority fee`. This leaves challenger agents with a significant
-buffer between the historical highest gas price of roughly `236` in 2020, and the base gas fee of `10,000`.
+With this approach, the size of the bond is computed up-front when a dispute game is created.
+For example, in an attestation dispute game, this bond size can be computed using the following
+simple linear function:
+```
+size = number of signers * gas used to progress game + security overhead
+```
+
+Notice that since the bond size is linearly proportional to the number of signers, the economic
+security a given bond size provides decreases as the number of signers increases.
+
+Working backwards, if we assume the number of signers to be `5` and the gas used to progress
+the game is `100,000` gas, then the bond size should cover `500,000` gas. This means that a bond
+of `1 ether` would cover the cost of progressing the game for `5` signers as long as the gas price
+(base fee) does not exceed `2,000 gwei`. This leaves a significant buffer between the highest
+historical gas price of roughly `236`.
 
 ### Variable Bond
 
