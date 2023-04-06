@@ -8,51 +8,53 @@
 - [The Bond Problem](#the-bond-problem)
   - [Simple Bond](#simple-bond)
   - [Variable Bond](#variable-bond)
-- [Types of Bond Managers](#types-of-bond-managers)
-  - [OracleBondManager](#oraclebondmanager)
-  - [AttestationBondManager](#attestationbondmanager)
-  - [FaultBondManager](#faultbondmanager)
+- [Bond Manager Interface](#bond-manager-interface)
+- [Bond Manager Implementation](#bond-manager-implementation)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
 ## Overview
 
-The bond manager contracts handle bonds for both the [dispute-games](./dispute-game.md)
-and the `L2OutputOracle` contract (detailed in [propoals](./proposals.md)).
+In the context of permissionless output proposals, bonds are a value that must
+be attached to an output proposal. In this case, the bond will be paid in ether.
 
-When outputs are permissionlessly posted to the `L2OutputOracle`, the proposer must
-submit some ether as a "bond" to disincentivize spam and invalid outputs. These bonds
-are handled by the `L2OutputOracle`'s bond manager. The `L2OutputOracle` contract should
-forward these bonds on proposals, and call bonds when outputs are either deleted or
-finalized.
+By requiring a bond to be posted with an output proposal, spam and invalid outputs
+are disincentivized. It's important to note that it is directly disincentivized
+because if the output is invalid, it will be seized by a set of challenge agents
+when the output is deleted. Thus, the bond acts as a form of economic security.
 
-Similarly, the various types of [dispute-games](./dispute-game-interface.md) require
-different bond management. In the simplest dispute game (the "Attestation" dispute game)
-bonds will not be required since the attestors are permissioned. But in more complex games, such as the
-fault dispute game, bonds will be required since the challengers and defenders perform a series of
-alternating onchain transactions requiring bonds at each step. In this case, a separate bond manager than
-that of the `L2OutputOracle` is required.
+Concretely, outputs will be permissionlessly proposed to the `L2OutputOracle` contract.
+When calling the propose function, the ether value is sent as the bond. This bond is
+then held by a bond manager contract. The bond manager contract is responsible for
+both the [dispute-games](./dispute-game.md) and the `L2OutputOracle` (further detailed
+in [proposals](./proposals.md)).
+
+The bond manager will need to handle bond logic for a variety of different
+[dispute-games](./dispute-game-interface.md). In the simplest "attestation" dispute game,
+bonds will not be required since the attestors are permissioned. But in more complex games,
+such as the fault dispute game, challengers and defenders perform a series of
+alternating onchain transactions requiring bonds at each step.
 
 ## The Bond Problem
 
 At its core, the bond manager is straightforward - it escrows or holds ether and returns
-it when finalized or seized. But the uncertainty of introducing bonds lies in the
-bond _sizing_, i.e. how much should a bond be? Sizing bonds correctly entails a variety of
-tradeoffs. Price them too high, and not enough proposers will post outputs. Price them too low, and
-challengers won't be incentivized to delete outputs if the gas cost of doing so outways the bond itself.
+it at maturity or seized. But the uncertainty of introducing bonds lies in the
+bond _sizing_, i.e. how much should a bond be? Sizing bonds correctly is a function of
+the bond invariant: the bond must be greater than or equal to the cost of the next step.
+If bonds are priced too low, then the bond invariant is violated and there isn't an economic
+incentive to execute the next step. If bonds are priced too high, then the actors posting
+bonds can be priced out.
 
 Below, we outline two different approaches to sizing bonds and the tradeoffs of each.
 
 ### Simple Bond
 
 The _Simple Bond_ is a very conservative approach to bond management, establishing a **fixed** bond
-size using the worst case gas cost for deleting an output proposal. The idea being
-that a bond posted for a given output proposal must at least cover the
-cost of the challenge agents deleting that output proposal in order to make
-dispute games incentive compatible.
+size. The idea behind simple bond pricing is to establish the worst case gas cost for
+the next step in the dispute game.
 
-With this approach, the Simple Bond is fixed to `1 ether`. By working backwards, we
-can establish that the cost of challenging an output proposal must not
+With this approach, the Simple Bond for an Attestation dispute game can be fixed to `1 ether`.
+By working backwards, we can establish that the cost of challenging an output proposal must not
 exceed `1 ether`. As such, this implies a base fee of `10,000` for a challenge costing
 `100,000` gas with a `1 gwei priority fee`. This leaves challenger agents with a significant
 buffer between the historical highest gas price of roughly `236` in 2020, and the base gas fee of `10,000`.
@@ -60,41 +62,40 @@ buffer between the historical highest gas price of roughly `236` in 2020, and th
 ### Variable Bond
 
 Better bond heuristics can be used to establish a bond price that accounts for
-the time-weighted gas price. One instance of this called _Varable Bonds_ use a separate oracle contract,
-`GasPriceFluctuationTracker`, that tracks gas fluctuations within a pre-determined
-bounds. This replaces the ideal solution of tracking challenge costs over all L1
-blocks, but provides a reasonable bounds. Proposers are responsible for funding this contract.
+the time-weighted gas price. One instance of this called _Varable Bonds_ use a
+separate oracle contract, `GasPriceFluctuationTracker`, that tracks gas fluctuations
+within a pre-determined bounds. This replaces the ideal solution of tracking
+challenge costs over all L1 blocks, but provides a reasonable bounds. The initial
+actors posting this bond are responsible for funding this contract.
 
-## Types of Bond Managers
+## Bond Manager Interface
 
-Below we outline the bond manager contracts.
+Below is a minimal interface for the bond manager contract.
 
-### OracleBondManager
+```solidity
+interface BondManager {
+  /// @notice Post the bond of the bond owner.
+  function postBond(address bondOwner) external;
 
-The oracle bond manager is handles bond management on behalf of the `L2OutputOracle`.
+  /// @notice Seize the bond of the bond owner.
+  /// @dev `nonce` is required since the bond owner may have multiple outstanding bonds.
+  function seizeBond(address bondOwner, uint256 nonce) external;
 
-In the `L2OutputOracle`, a permissionless proposer can post an output proposal, which
-becomes finalized after a pre-determined interval detailed in the
-[proposals doc](./proposals.md). When proposing an output, the proposer must
-post a bond that is used to disincentivize spam. When the output is finalized,
-the bond may be claimed by the proposer. But in the case that the output is invalid,
-the bond *should* be seized by a set of challenge agents or a
-[dispute game](./dispute-game.md).
+  /// @notice Claim the bond of the bond owner.
+  /// @dev `nonce` is required since the bond owner may have multiple outstanding bonds.
+  function claimBond(address bondOwner, uint256 nonce) external;
+}
+```
 
-### AttestationBondManager
+## Bond Manager Implementation
 
-The attestation bond manager is the simplest bond manager; there is none!
+Initially, the bond manager will only be used by the `L2OutputOracle` contract
+for output proposals in the attestation [dispute game](./dispute-game.md). Since
+the attestation dispute game has a permissioned set of attestors, there are no
+bonds required.
 
-Attestors are a set of permissioned addresses that, when a quorum is reached,
-are able to delete an output proposal. Since the attestors are permissioned, they
-don't need to post bonds, but can only seize the proposers bond posted to the
-`L2OutputOracle` (and by extension, the [OracleBondManager](#-oraclebondmanager)).
-
-### FaultBondManager
-
-When fault-based [dispute games](./dispute-game.md) are introduced,
-permissionless output proposals can be disputed by a `FaultDisputeGame` instead of
-the permissioned attestors. In these game contracts, bonds are posted
-at each step of the game. Once the game is finished, bonds are dispersed to the
+In the future however, Fault-based dispute games will be introduced and will
+require bond management. In these games, bonds will be posted at each step of
+the dispute game. Once the game is finished, bonds are dispersed to the
 winners - either the output challengers or defenders (who including the proposer).
 The `FaultBondManager` contract manages all these bonds.
