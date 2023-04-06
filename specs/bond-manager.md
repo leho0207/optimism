@@ -2,13 +2,13 @@
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+**Table of Contents**
 
 - [Overview](#overview)
 - [The Bond Problem](#the-bond-problem)
   - [Simple Bond](#simple-bond)
   - [Variable Bond](#variable-bond)
-- [Bond Manager Interface](#bond-manager-interface)
+- [Contract Interface](#contract-interface)
 - [Bond Manager Implementation](#bond-manager-implementation)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
@@ -56,8 +56,9 @@ the next step in the dispute game.
 With this approach, the size of the bond is computed up-front when a dispute game is created.
 For example, in an attestation dispute game, this bond size can be computed using the following
 simple linear function:
-```
-size = number of signers * gas used to progress game + security overhead
+
+```md
+size = number of signers * (gas used to progress game + security overhead)
 ```
 
 Notice that since the bond size is linearly proportional to the number of signers, the economic
@@ -66,8 +67,8 @@ security a given bond size provides decreases as the number of signers increases
 Working backwards, if we assume the number of signers to be `5` and the gas used to progress
 the game is `100,000` gas, then the bond size should cover `500,000` gas. This means that a bond
 of `1 ether` would cover the cost of progressing the game for `5` signers as long as the gas price
-(base fee) does not exceed `2,000 gwei`. This leaves a significant buffer between the highest
-historical gas price of roughly `236`.
+(base fee) does not exceed `2,000 gwei` for the entire finalization window. It would be prohibitively
+expensive to keep the settlement layer base fee this high.
 
 ### Variable Bond
 
@@ -78,7 +79,7 @@ within a pre-determined bounds. This replaces the ideal solution of tracking
 challenge costs over all L1 blocks, but provides a reasonable bounds. The initial
 actors posting this bond are responsible for funding this contract.
 
-## Bond Manager Interface
+## Contract Interface
 
 Below is a minimal interface for the bond manager contract.
 
