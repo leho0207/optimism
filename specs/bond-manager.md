@@ -31,14 +31,14 @@ in [proposals](./proposals.md)).
 
 The bond manager will need to handle bond logic for a variety of different
 [dispute-games](./dispute-game-interface.md). In the simplest "attestation" dispute game,
-bonds will not be required since the attestors are permissioned. But in more complex games,
-such as the fault dispute game, challengers and defenders perform a series of
-alternating onchain transactions requiring bonds at each step.
+bonds will not be required since the attestors are a permissioned set of trusted entities.
+But in more complex games, such as the fault dispute game, challengers and defenders
+perform a series of alternating onchain transactions requiring bonds at each step.
 
 ## The Bond Problem
 
-At its core, the bond manager is straightforward - it escrows or holds ether and returns
-it at maturity or seized. But the uncertainty of introducing bonds lies in the
+At its core, the bond manager is straightforward - it escrows or holds ether and can be claimed
+at maturity or seized if forfeited. But the uncertainty of introducing bonds lies in the
 bond _sizing_, i.e. how much should a bond be? Sizing bonds correctly is a function of
 the bond invariant: the bond must be greater than or equal to the cost of the next step.
 If bonds are priced too low, then the bond invariant is violated and there isn't an economic
@@ -54,18 +54,19 @@ size. The idea behind simple bond pricing is to establish the worst case gas cos
 the next step in the dispute game.
 
 With this approach, the size of the bond is computed up-front when a dispute game is created.
-For example, in an attestation dispute game, this bond size can be computed using the following
-simple linear function:
+For example, in an attestation dispute game, this bond size can be computed as such:
 
 ```md
-size = number of signers * (gas used to progress game + security overhead)
+bond_size = (signer_threshold * (challenge_gas + security overhead)) + resolution_gas(signer_threshold)
 ```
 
 Notice that since the bond size is linearly proportional to the number of signers, the economic
-security a given bond size provides decreases as the number of signers increases.
+security a given bond size provides decreases as the number of signers increases. Also note, the
+`resolution_gas` function is split out from the `challenge_gas` cost because only the _last_ challenger
+will pay for the gas cost to resolve the game in the attestation dispute game.
 
-Working backwards, if we assume the number of signers to be `5` and the gas used to progress
-the game is `100,000` gas, then the bond size should cover `500,000` gas. This means that a bond
+Working backwards, if we assume the number of signers to be `5`, a negligible resolution gas cost, and
+a `100,000` gas cost to progress the game, then the bond size should cover `500,000` gas. Meaning, a bond
 of `1 ether` would cover the cost of progressing the game for `5` signers as long as the gas price
 (base fee) does not exceed `2,000 gwei` for the entire finalization window. It would be prohibitively
 expensive to keep the settlement layer base fee this high.
@@ -84,19 +85,52 @@ actors posting this bond are responsible for funding this contract.
 Below is a minimal interface for the bond manager contract.
 
 ```solidity
-interface BondManager {
-  /// @notice Post the bond of the bond owner.
-  function postBond(address bondOwner) external;
+/**
+ * @title IBondManager
+ * @notice The IBondManager is an interface for a contract that handles bond management.
+ */
+interface IBondManager {
+  /**
+    * @notice Post a bond with a given id and owner.
+    * @dev This function will revert if the provided bondId is already in use.
+    * @param bondId is the id of the bond.
+    * @param owner is the address that owns the bond.
+    * @param minClaimHold is the minimum amount of time the owner must wait before reclaiming their bond.
+    */
+  function postBond(bytes32 bondId, address owner, uint64 minClaimHold) external payable;
 
-  /// @notice Seize the bond of the bond owner.
-  /// @dev `nonce` is required since the bond owner may have multiple outstanding bonds.
-  function seizeBond(address bondOwner, uint256 nonce) external;
+  /**
+    * @notice Seizes the bond with the given id.
+    * @dev This function will revert if there is no bond at the given id.
+    * @param bondId is the id of the bond.
+    */
+  function seizeBond(bytes32 bondId) external;
 
-  /// @notice Claim the bond of the bond owner.
-  /// @dev `nonce` is required since the bond owner may have multiple outstanding bonds.
-  function claimBond(address bondOwner, uint256 nonce) external;
+  /**
+    * @notice Seizes the bond with the given id and distributes it to recipients.
+    * @dev This function will revert if there is no bond at the given id.
+    * @param bondId is the id of the bond.
+    * @param recipients is a set of addresses to split the bond amongst.
+    */
+  function seizeBondAndSplit(bytes32 bondId, address[] calldata recipients) external;
+
+  /**
+    * @notice Reclaims the bond of the bond owner.
+    * @dev This function will revert if there is no bond at the given id.
+    * @param bondId is the id of the bond.
+    */
+  function reclaimBond(bytes32 bondId) external;
 }
 ```
+
+**Note**
+
+The `bytes32 bondId` can be constructed using the `keccak256` hash of a given identifier.
+For example, the `L2OutputOracle` can create a `bondId` by taking the `keccak256` hash of
+the `l2BlockNumber` associated with the output proposal since there will only ever be one
+outstanding output proposal for a given `l2BlockNumber`.
+This also avoids the issue where an output proposer can have multiple bonds if bonds were
+instead tied to the address of the output proposer.
 
 ## Bond Manager Implementation
 
