@@ -6,6 +6,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/eth"
 	opmetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	txmetrics "github.com/ethereum-optimism/optimism/op-service/txmgr/metrics"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 type noopMetrics struct {
